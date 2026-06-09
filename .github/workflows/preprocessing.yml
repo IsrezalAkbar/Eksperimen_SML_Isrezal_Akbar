@@ -5,21 +5,23 @@ on:
     branches:
       - main
       - master
-    paths:
-      - 'dataset_raw/**'
-      - 'preprocessing/**'
-      - '.github/workflows/preprocessing.yml'
-  workflow_dispatch:        # Bisa dijalankan manual dari GitHub UI
+  workflow_dispatch:
 
 jobs:
   preprocessing:
     name: Run Preprocessing Pipeline
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: write        # ← FIX: izin eksplisit untuk git push
+
     steps:
       # ── 1. Checkout repository ──────────────────────────────────────
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0     # ← FIX: fetch semua history agar git push tidak error 128
 
       # ── 2. Setup Python 3.12.7 ──────────────────────────────────────
       - name: Set up Python 3.12.7
@@ -34,46 +36,46 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # ── 4. Verifikasi dataset tersedia ──────────────────────────────
-      - name: Verify Dataset Exists
+      # ── 4. Download dataset jika belum ada ──────────────────────────
+      - name: Download Dataset
         run: |
-          if [ ! -f "dataset_raw/winequality.csv" ]; then
-            echo "Dataset not found! Downloading from UCI..."
-            python - <<'EOF'
-          import urllib.request, os
+          python - <<'PYEOF'
+          import os, pandas as pd
           os.makedirs("dataset_raw", exist_ok=True)
-          url_red   = "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv"
-          url_white = "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv"
-          import pandas as pd
-          df_red   = pd.read_csv(url_red,   sep=";")
-          df_white = pd.read_csv(url_white, sep=";")
-          df_red["wine_type"]   = 0
-          df_white["wine_type"] = 1
-          df = pd.concat([df_red, df_white], ignore_index=True)
-          df.to_csv("dataset_raw/winequality.csv", index=False)
-          print(f"Dataset saved: {df.shape}")
-          EOF
-          else
-            echo "Dataset found."
-          fi
+          path = "dataset_raw/winequality.csv"
+          if not os.path.exists(path):
+              print("Downloading dataset dari UCI...")
+              url_red   = "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-red.csv"
+              url_white = "https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv"
+              df_red    = pd.read_csv(url_red,   sep=";")
+              df_white  = pd.read_csv(url_white, sep=";")
+              df_red["wine_type"]   = 0
+              df_white["wine_type"] = 1
+              df = pd.concat([df_red, df_white], ignore_index=True)
+              df.to_csv(path, index=False)
+              print(f"Dataset disimpan: {df.shape}")
+          else:
+              df = pd.read_csv(path)
+              print(f"Dataset sudah ada: {df.shape}")
+          PYEOF
 
       # ── 5. Jalankan preprocessing otomatis ──────────────────────────
       - name: Run Automated Preprocessing
         run: |
-          python preprocessing/automate_NamaSiswa.py \
+          python preprocessing/automate_Isrezal_Akbar.py \
             --input  dataset_raw/winequality.csv \
             --output preprocessing/dataset_preprocessing
 
-      # ── 6. Verifikasi output preprocessing ──────────────────────────
+      # ── 6. Verifikasi output ─────────────────────────────────────────
       - name: Verify Preprocessing Output
         run: |
           echo "=== Preprocessing Output Files ==="
+          ls -lh preprocessing/dataset_preprocessing/
           for f in preprocessing/dataset_preprocessing/*.csv; do
-            lines=$(wc -l < "$f")
-            echo "  $f  →  $lines baris"
+            echo "  $f: $(wc -l < $f) baris"
           done
 
-      # ── 7. Upload hasil preprocessing sebagai GitHub Artifact ───────
+      # ── 7. Upload Artifact ───────────────────────────────────────────
       - name: Upload Preprocessed Dataset as Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -81,14 +83,17 @@ jobs:
           path: preprocessing/dataset_preprocessing/
           retention-days: 30
 
-      # ── 8. Commit hasil preprocessing ke repository ─────────────────
-      - name: Commit Preprocessed Dataset to Repository
+      # ── 8. Commit hasil ke repository ───────────────────────────────
+      - name: Commit and Push Preprocessed Dataset
         run: |
           git config --global user.name  "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add preprocessing/dataset_preprocessing/
-          git diff --staged --quiet || git commit -m \
-            "ci: update preprocessed dataset [run #${{ github.run_number }}]"
-          git push
+          git add preprocessing/dataset_preprocessing/ dataset_raw/
+          if git diff --staged --quiet; then
+            echo "Tidak ada perubahan — skip commit."
+          else
+            git commit -m "ci: auto-update preprocessed dataset [run #${{ github.run_number }}]"
+            git push origin HEAD:${{ github.ref_name }}
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
